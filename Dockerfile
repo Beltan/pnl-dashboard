@@ -12,4 +12,4 @@ COPY package.json ./
 COPY --from=build /app/dist ./dist
 USER node
 EXPOSE 8082
-CMD ["node", "dist/main.js"]
+CMD ["node", "--experimental-sqlite", "dist/main.js"]

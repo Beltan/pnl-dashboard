@@ -7,7 +7,6 @@ export interface Watched {
 export interface ChainConfig {
   /** Key used in env var names and in the API, lowercased. */
   name: string;
-  rpcUrl: string;
   /** Etherscan-compatible API root; Blockscout serves the same shape. */
   explorerUrl: string;
   /** Link root for a human, e.g. https://flare-explorer.flare.network */
@@ -26,10 +25,11 @@ export interface AppConfig {
   host: string;
   user: string;
   password: string;
-  /** How far back the poller keeps history. */
+  /** Where the history lives. History is kept in full; this is only what the page opens on. */
   windowHours: number;
-  /** Seconds between refreshes. */
+  /** Seconds between syncs. */
   refreshSeconds: number;
+  dbPath: string;
   chains: ChainConfig[];
 }
 
@@ -40,20 +40,21 @@ export interface Trade {
   from: string;
   fromLabel: string;
   to: string | null;
+  toLabel: string | null;
   blockNumber: number;
   /** Unix seconds. */
   timestamp: number;
   /** 1 landed, 0 reverted. */
   status: number;
   gasUsed: number;
-  effectiveGasPrice: string;
-  /** Native units. */
+  /** Native units; zero when someone else paid. */
   gasNative: number;
   gasUsd: number | null;
   /** The token the transaction left behind with a watched address, if any. */
   profitToken: string | null;
   profitSymbol: string | null;
-  profitRaw: string | null;
+  /** Whole tokens. */
+  profitAmount: number | null;
   profitUsd: number | null;
   /** `profitUsd - gasUsd`; null when either side is unpriced. */
   netUsd: number | null;

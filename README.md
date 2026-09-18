@@ -2,16 +2,33 @@
 
 A profit-and-loss dashboard for arbitrary chains and addresses, configured entirely by environment.
 
-It reads the chain, not a bot's database. For every transaction a watched address sent, it takes the
-receipt, nets the ERC20 transfers that ended with a watched address, prices what was left behind, and
-subtracts the gas actually paid. That makes it independent of whatever produced the transactions, and
-it makes the chain the record: a bot that fails to write a row, or writes the wrong one, cannot skew
-what this shows.
+It reads the chain, not a bot's database. For every transaction involving a watched address it takes
+the gas actually paid and nets the ERC20 movements that ended with the watched set, then prices what
+was left behind. That makes it independent of whatever produced the transactions, and it makes the
+chain the record: a bot that fails to write a row, or writes the wrong one, cannot skew what this
+shows.
 
-## What it needs
+## Where the data comes from
 
-Per chain: a JSON-RPC endpoint, an Etherscan-compatible explorer API (Blockscout serves the same
-shape), and the addresses to watch. Prices come from GeckoTerminal. Nothing is written anywhere.
+Two Etherscan-compatible explorer endpoints per chain, and nothing else:
+
+- `txlist` — the transactions, with gas used, the effective gas price, and whether they landed.
+- `tokentx` — the ERC20 movements, carrying each token's own symbol and decimals.
+
+No archive node, no `eth_getTransactionReceipt` per transaction, no ABI. A wallet with a hundred
+thousand transactions backfills in explorer pages rather than in a hundred thousand RPC calls.
+Prices come from GeckoTerminal.
+
+## History and backfill
+
+History is kept in full, in SQLite, from each watched address's **first** transaction. The first run
+backfills; every run after that resumes from a per-address, per-endpoint block cursor, so a restart
+costs one page. `WINDOW_HOURS` is only what the page opens on — the window selector reaches back to
+all of it.
+
+The walk advances by block rather than page number, because these APIs cap how deep `page=` goes and
+the cap sits well inside a busy wallet's history. The boundary block is re-read on the next pass and
+collapses on the primary key, so a block whose rows span two pages is never half-read.
 
 ## Configuration
 
@@ -21,18 +38,21 @@ so adding a chain is configuration and never code. Copy `.env.example` to `.env`
 | Variable | Meaning |
 |---|---|
 | `CHAINS` | comma-separated chain names, e.g. `flare,avax` |
-| `<CHAIN>_RPC_URL` | JSON-RPC endpoint, used for receipts and token metadata |
-| `<CHAIN>_EXPLORER_URL` | Etherscan-compatible API root, used to list an address's transactions |
+| `<CHAIN>_EXPLORER_URL` | Etherscan-compatible API root; Blockscout and Routescan both serve it |
 | `<CHAIN>_EXPLORER_SITE` | where a transaction link points; defaults to the API root without `/api` |
-| `<CHAIN>_ADDRESSES` | `address[:label]`, comma separated |
-| `<CHAIN>_NATIVE_SYMBOL` | gas token symbol, for display |
-| `<CHAIN>_NATIVE_DECIMALS` | defaults to 18 |
+| `<CHAIN>_ADDRESSES` | `address[:label]`, comma separated — contracts and the wallets that drive them |
+| `<CHAIN>_NATIVE_SYMBOL` / `_NATIVE_DECIMALS` | the gas token |
 | `<CHAIN>_GECKO_NETWORK` | GeckoTerminal network id; empty leaves everything unpriced |
 | `<CHAIN>_NATIVE_PRICE_TOKEN` | the wrapped native token, which is how gas gets a USD price |
-| `WINDOW_HOURS` | how much history to hold in memory (default 24) |
-| `REFRESH_SECONDS` | how often to re-read the chains (default 60) |
+| `WINDOW_HOURS` | what the page opens on (default 24); history is kept in full regardless |
+| `REFRESH_SECONDS` | how often to sync (default 60); passes never overlap |
+| `DB_PATH` | where the history lives (default `data/pnl.db`) |
 | `AUTH_USER` / `AUTH_PASSWORD` | basic auth over every route; an empty password leaves it open |
 | `PORT` / `HOST` | where to listen |
+
+Watch both a contract and the wallet that drives it. The contract is where profit rests; the wallet
+is what pays the gas, and gas is only counted when a watched address paid it — a call to one of our
+contracts from someone else's wallet earns us the profit without costing us the fee.
 
 ## Running
 
@@ -43,27 +63,35 @@ npm run build
 npm start         # reads .env if present
 ```
 
-Or `docker compose up -d --build`, which reads the same `.env`.
+Or `docker compose up -d --build`, which reads the same `.env`. SQLite needs Node's
+`--experimental-sqlite` flag, which the scripts and the image already pass.
 
 ## Routes
 
 | Route | What it serves |
 |---|---|
 | `/` | the dashboard; `?theme=dark\|light\|auto` overrides the stored theme |
-| `/api/meta` | configured chains, addresses and the window held |
-| `/api/trades` | filtered trades, totals and the chart series; `chain`, `address`, `outcome`, `hours` |
-| `/healthz` | per-chain refresh state; 503 until every chain has refreshed once |
+| `/api/meta` | configured chains, addresses, sync state and how much history is held |
+| `/api/trades` | filtered trades, totals and the chart series; `chain`, `address`, `outcome`, `hours` (`hours=0` is all of it) |
+| `/healthz` | per-chain sync state and store counts; 503 until every chain has synced once |
 
 ## How profit is decided
 
-A transaction's profit is the largest positive net ERC20 delta across the watched addresses. In a
+A transaction's profit is the largest positive net across the watched set, per token. In a
 flash-swap round trip every token it passes through nets to zero and the surplus rests in one, so
-that delta is the trade's gross. Gas is `gasUsed x effectiveGasPrice` in native units, priced through
-the wrapped native token. A token GeckoTerminal does not price is reported as unpriced rather than
-valued at zero, and the totals say how many rows that left out: a missing price is not no profit.
+that net is the trade's gross. Movements between two watched addresses are dropped: moving your own
+money is not profit, which is also why a sweep from a contract to its owner does not register as one.
+
+Gas is `gasUsed x gasPrice` in native units, priced through the wrapped native token.
+
+**Amounts are valued at current prices, not the price at the time of the trade.** That is deliberate
+— it answers "what is the profit I am holding worth now" — but it means a historical window is
+revalued every time you load it, and a token that has moved a long way since will not reconcile with
+what it was worth on the day. A token GeckoTerminal does not price is reported as unpriced rather
+than valued at zero, and the totals say how many rows that left out.
 
 ## What it does not do
 
-It holds its window in memory and backfills on boot, so a restart costs one explorer pass and nothing
-else. It tracks no positions, sends nothing, and has no database. Whatever the transactions were for
-— arbitrage, liquidations, anything else — it only knows what the chain says they earned and cost.
+It tracks no positions, sends nothing, and knows nothing about lanes, triggers or strategies —
+whatever the transactions were for, it only knows what the chain says they earned and cost. It has
+no notion of a trade that was planned and refused, because such a thing never reaches the chain.

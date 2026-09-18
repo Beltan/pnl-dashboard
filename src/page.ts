@@ -103,7 +103,7 @@ const HTML = `<!doctype html>
   <section class="panel scroll">
     <table>
       <thead><tr>
-        <th>Time (UTC)</th><th>Chain</th><th>From</th><th>Outcome</th>
+        <th>Time (UTC)</th><th>Chain</th><th>From</th><th>Contract</th><th>Outcome</th>
         <th class="num">Gas</th><th class="num">Profit</th><th class="num">Net USD</th><th>Tx</th>
       </tr></thead>
       <tbody id="rows"></tbody>
@@ -242,6 +242,7 @@ function rows() {
       "<td>" + stamp(t.timestamp) + "</td>" +
       "<td>" + t.chain + "</td>" +
       "<td>" + t.fromLabel + "</td>" +
+      "<td>" + (t.toLabel || "—") + "</td>" +
       '<td><span class="pill">' + (t.status === 1 ? "landed" : "reverted") + "</span></td>" +
       '<td class="num">' + usd(t.gasUsd) + "</td>" +
       '<td class="num">' + (t.profitSymbol ? usd(t.profitUsd) + " " + t.profitSymbol : "—") + "</td>" +
@@ -266,13 +267,16 @@ function addresses() {
 }
 
 // Asking for more than the poller holds would quietly show a short window as if it were full.
-function windows(held) {
-  var choices = [1, 8, 24, 72, 168].filter(function (h) { return h < held; });
-  choices.push(held);
-  $("hours").innerHTML = choices.map(function (h) {
+function windows(opens) {
+  var choices = [1, 8, 24, 72, 168, 720];
+  if (choices.indexOf(opens) === -1) choices.push(opens);
+  choices.sort(function (a, b) { return a - b; });
+  var options = choices.map(function (h) {
     var label = h < 48 ? h + (h === 1 ? " hour" : " hours") : Math.round(h / 24) + " days";
-    return '<option value="' + h + '"' + (h === held ? " selected" : "") + ">" + label + "</option>";
-  }).join("");
+    return '<option value="' + h + '"' + (h === opens ? " selected" : "") + ">" + label + "</option>";
+  });
+  options.push('<option value="0">All history</option>');
+  $("hours").innerHTML = options.join("");
 }
 
 function query() {
@@ -288,14 +292,16 @@ async function load() {
     addresses();
     windows(META.windowHours);
   }
+  META = await (await fetch("/api/meta")).json();
   DATA = await (await fetch("/api/trades" + query())).json();
+  if (DATA.error) { $("sub").textContent = "query failed: " + DATA.error; return; }
   tiles(DATA.totals);
   draw();
   rows();
   var when = DATA.refreshedAt ? new Date(DATA.refreshedAt).toISOString().slice(11, 19) + " UTC" : "never";
   $("sub").textContent = DATA.totals.sent + " transactions · refreshed " + when;
   var notes = [];
-  if (DATA.truncated) notes.push(DATA.truncated + " older rows not shown");
+  if (DATA.truncated) notes.push("older rows beyond the row cap are not shown");
   if (DATA.totals.unpriced) notes.push(DATA.totals.unpriced + " trades hold a token with no price, so their profit is missing from the totals");
   notes.push("bucket " + Math.round(DATA.stepSeconds / 60) + " min");
   $("foot").textContent = notes.join(" · ");

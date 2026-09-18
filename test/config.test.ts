@@ -8,7 +8,6 @@ const CONTRACT = "0x3417afa3b5487b3abcd4fe55f83f4d3e53750d71";
 function env(over: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
     CHAINS: "flare",
-    FLARE_RPC_URL: "http://node:9650/ext/C/rpc",
     FLARE_EXPLORER_URL: "https://flare-explorer.flare.network/api",
     FLARE_ADDRESSES: WALLET + ":Arb wallet," + CONTRACT + ":FlashSwap",
     ...over,
@@ -40,8 +39,8 @@ test("a chain reads its own prefixed variables", () => {
 
 test("a missing variable names itself", () => {
   const broken = env();
-  delete broken.FLARE_RPC_URL;
-  assert.throws(() => loadConfig(broken), /FLARE_RPC_URL is not set/);
+  delete broken.FLARE_EXPLORER_URL;
+  assert.throws(() => loadConfig(broken), /FLARE_EXPLORER_URL is not set/);
 });
 
 test("a second chain needs its own block of variables", () => {

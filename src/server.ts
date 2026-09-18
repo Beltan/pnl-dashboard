@@ -1,23 +1,27 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { authorised } from "./auth.ts";
-import { filter, series, totals, type Query } from "./api.ts";
+import { clauses, loadPrices, priced, series, totals, type Query } from "./api.ts";
 import { log } from "./log.ts";
 import { page } from "./page.ts";
-import type { Poller } from "./poller.ts";
+import type { Prices } from "./pricing.ts";
+import type { Store } from "./store.ts";
+import type { Sync } from "./sync.ts";
 import type { AppConfig } from "./types.ts";
 
+/** Rows returned to the page. Beyond this the table stops being readable anyway. */
+const MAX_ROWS = 2_000;
+
 function json(response: ServerResponse, body: unknown, status = 200): void {
-  const text = JSON.stringify(body);
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-  response.end(text);
+  response.end(JSON.stringify(body));
 }
 
 function queryFrom(url: URL): Query {
-  const hours = Number(url.searchParams.get("hours"));
-  const outcome = url.searchParams.get("outcome");
   const query: Query = {};
   const chain = url.searchParams.get("chain");
   const address = url.searchParams.get("address");
+  const outcome = url.searchParams.get("outcome");
+  const hours = Number(url.searchParams.get("hours"));
   if (chain && chain !== "all") query.chain = chain;
   if (address && address !== "all") query.address = address.toLowerCase();
   if (outcome === "landed" || outcome === "reverted") query.outcome = outcome;
@@ -25,25 +29,25 @@ function queryFrom(url: URL): Query {
   return query;
 }
 
-/** The bucket width that keeps a window readable: about 24-60 bars, never sub-minute. */
+/** The bucket width that keeps a window readable: about 48 bars, never sub-five-minute. */
 export function stepFor(hours: number): number {
-  const target = Math.ceil((hours * 3600) / 48 / 300) * 300;
-  return Math.max(300, target);
+  return Math.max(300, Math.ceil((hours * 3600) / 48 / 300) * 300);
 }
 
-export function createDashboard(config: AppConfig, poller: Poller) {
-  return createServer((request: IncomingMessage, response: ServerResponse) => {
+export function createDashboard(config: AppConfig, store: Store, sync: Sync, prices: Prices) {
+  const chains = new Map(config.chains.map((chain) => [chain.name, chain]));
+  const labels = new Map<string, string>();
+  for (const chain of config.chains) {
+    for (const entry of chain.watched) labels.set(`${chain.name}:${entry.address}`, entry.label);
+  }
+
+  return createServer(async (request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
 
     if (url.pathname === "/healthz") {
-      const chains = [...poller.snapshot().entries()].map(([name, state]) => ({
-        chain: name,
-        trades: state.trades.length,
-        refreshedAt: state.refreshedAt,
-        error: state.error,
-      }));
-      const healthy = chains.every((chain) => chain.refreshedAt !== null && chain.error === null);
-      json(response, { ok: healthy, chains }, healthy ? 200 : 503);
+      const state = [...sync.snapshot().entries()].map(([name, held]) => ({ chain: name, ...held }));
+      const healthy = state.every((chain) => chain.syncedAt !== null && chain.error === null);
+      json(response, { ok: healthy, chains: state, store: store.stats() }, healthy ? 200 : 503);
       return;
     }
 
@@ -56,31 +60,42 @@ export function createDashboard(config: AppConfig, poller: Poller) {
     }
 
     if (url.pathname === "/api/meta") {
+      const stats = store.stats();
       json(response, {
         windowHours: config.windowHours,
         refreshSeconds: config.refreshSeconds,
+        stats,
         chains: config.chains.map((chain) => ({
           name: chain.name,
           nativeSymbol: chain.nativeSymbol,
           explorerSite: chain.explorerSite,
           addresses: chain.watched,
+          state: sync.snapshot().get(chain.name) ?? null,
         })),
       });
       return;
     }
 
     if (url.pathname === "/api/trades") {
-      const query = queryFrom(url);
-      const rows = filter(poller.trades(), query);
-      const hours = query.hours ?? config.windowHours;
-      json(response, {
-        totals: totals(rows),
-        series: series(rows, stepFor(hours)),
-        stepSeconds: stepFor(hours),
-        trades: rows.slice(0, 1000),
-        truncated: Math.max(0, rows.length - 1000),
-        refreshedAt: Math.max(0, ...[...poller.snapshot().values()].map((state) => state.refreshedAt ?? 0)) || null,
-      });
+      try {
+        const query = queryFrom(url);
+        const { where, params } = clauses(query);
+        const rows = store.query(where, params, MAX_ROWS);
+        await loadPrices(store, config.chains, prices, rows);
+        const trades = priced(rows, chains, prices, labels);
+        const hours = query.hours ?? config.windowHours;
+        json(response, {
+          totals: totals(trades),
+          series: series(trades, stepFor(hours)),
+          stepSeconds: stepFor(hours),
+          trades,
+          truncated: rows.length === MAX_ROWS,
+          syncedAt: Math.max(0, ...[...sync.snapshot().values()].map((held) => held.syncedAt ?? 0)) || null,
+        });
+      } catch (error) {
+        log.error("A trades query failed", { error: String(error) });
+        json(response, { error: String(error) }, 500);
+      }
       return;
     }
 
@@ -88,8 +103,8 @@ export function createDashboard(config: AppConfig, poller: Poller) {
   });
 }
 
-export function serve(config: AppConfig, poller: Poller) {
-  const server = createDashboard(config, poller);
+export function serve(config: AppConfig, store: Store, sync: Sync, prices: Prices) {
+  const server = createDashboard(config, store, sync, prices);
   server.listen(config.port, config.host, () => {
     log.info("Dashboard listening", { host: config.host, port: config.port, chains: config.chains.map((c) => c.name) });
     if (!config.password) log.warn("AUTH_PASSWORD is empty, so every route is open");

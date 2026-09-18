@@ -51,7 +51,6 @@ function chainFrom(env: NodeJS.ProcessEnv, name: string): ChainConfig {
   if (watched.length === 0) throw new Error(`${prefix}_ADDRESSES lists no address`);
   return {
     name: name.toLowerCase(),
-    rpcUrl: required(env, `${prefix}_RPC_URL`),
     explorerUrl,
     explorerSite: (env[`${prefix}_EXPLORER_SITE`]?.trim() ?? explorerUrl.replace(/\/api$/, "")).replace(/\/+$/, ""),
     nativeSymbol: env[`${prefix}_NATIVE_SYMBOL`]?.trim() || "NATIVE",
@@ -81,6 +80,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     password: env.AUTH_PASSWORD ?? "",
     windowHours: number(env, "WINDOW_HOURS", 24),
     refreshSeconds: number(env, "REFRESH_SECONDS", 60),
+    dbPath: env.DB_PATH?.trim() || "data/pnl.db",
     chains,
   };
 }
