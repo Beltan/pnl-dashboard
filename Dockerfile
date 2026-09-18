@@ -11,5 +11,5 @@ ENV NODE_ENV=production
 COPY package.json ./
 COPY --from=build /app/dist ./dist
 USER node
-EXPOSE 8082
+EXPOSE 8080
 CMD ["node", "--experimental-sqlite", "dist/main.js"]

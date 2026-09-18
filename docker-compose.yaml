@@ -9,4 +9,4 @@ services:
     env_file: .env
     # Bound to loopback: put a reverse proxy in front if it needs to leave the box.
     ports:
-      - "127.0.0.1:${PORT:-8082}:${PORT:-8082}"
+      - "127.0.0.1:${PORT:-8080}:${PORT:-8080}"
