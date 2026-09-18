@@ -1,4 +1,4 @@
-import { log } from "../log.ts";
+import { log, reason } from "../log.ts";
 
 /** A transaction row from `txlist`. `gasPrice` is the effective price actually paid. */
 export interface TxRow {
@@ -80,8 +80,8 @@ export async function walk<T extends { blockNumber: string; hash: string }>(
     try {
       rows = await page<T>(explorerUrl, action, address, cursor);
     } catch (error) {
-      log.warn("An explorer page failed", { address, action, cursor, error: String(error) });
-      return { highest, error: String(error) };
+      log.warn("An explorer page failed", { address, action, cursor, error: reason(error) });
+      return { highest, error: reason(error) };
     }
     if (rows.length === 0) break;
     onPage(rows);

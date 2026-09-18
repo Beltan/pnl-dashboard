@@ -66,3 +66,13 @@ test("an explorer that starts failing part way through stops counting as synced"
     server.close();
   }
 });
+
+test("a failure says what actually went wrong, not just that fetch failed", async () => {
+  // A name that cannot resolve, which is what a container without a working resolver sees.
+  const sync = new Sync(config("http://nonexistent.invalid/api"), new Store(":memory:"));
+  await sync.pass();
+
+  const held = sync.snapshot().get("flare")!;
+  assert.doesNotMatch(held.error!, /^.*txlist: TypeError: fetch failed;/, "the wrapper alone is not a reason");
+  assert.match(held.error!, /EAI_AGAIN|ENOTFOUND|getaddrinfo/, "the DNS failure has to be visible");
+});
