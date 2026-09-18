@@ -1,0 +1,12 @@
+name: pnl-dashboard
+
+services:
+  dashboard:
+    build: .
+    image: pnl-dashboard:latest
+    container_name: pnl-dashboard
+    restart: unless-stopped
+    env_file: .env
+    # Bound to loopback: put a reverse proxy in front if it needs to leave the box.
+    ports:
+      - "127.0.0.1:${PORT:-8082}:${PORT:-8082}"

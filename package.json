@@ -1,0 +1,21 @@
+{
+  "name": "pnl-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "On-chain P&L dashboard for arbitrary chains and addresses, configured by environment only.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node --env-file-if-exists=.env dist/main.js",
+    "dev": "node --watch --env-file-if-exists=.env --experimental-strip-types src/main.ts",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
