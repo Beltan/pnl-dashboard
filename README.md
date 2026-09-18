@@ -81,8 +81,24 @@ every deploy backfills from the beginning again.
 |---|---|
 | `/` | the dashboard; `?theme=dark\|light\|auto` overrides the stored theme |
 | `/api/meta` | configured chains, addresses, sync state and how much history is held |
-| `/api/trades` | filtered trades, totals and the chart series; `chain`, `address`, `outcome`, `hours` (`hours=0` is all of it) |
+| `/api/trades` | one page of trades, plus totals and the chart series over the whole window; `chain`, `address`, `outcome`, `hours` (`hours=0` is all of it), `minNet`/`maxNet`, `page`, `size` |
 | `/healthz` | `503` until every chain has read its full history, and whenever a pass since then stopped short; per-chain state and store counts are added for an authenticated caller |
+
+## Paging and the net filter
+
+The table is paged; the tiles and the chart are not. Both always describe the whole window, so
+turning to page 40 does not change what the window earned.
+
+A page is chosen before the transfers are netted, so its cost is the size of the page rather than
+the size of the history: fifty rows out of a hundred and sixty thousand is about the same work as
+the first fifty.
+
+`minNet` and `maxNet` are the exception, and the reason is worth knowing. Net is priced when the
+request is answered, from prices held in memory, and is never stored — so SQL cannot filter on it
+and cannot count it either. Those two bounds are applied after the rows are valued, which means the
+rows have to be valued first. That work is capped at the 50,000 most recent matching transactions;
+the page says so when the cap is reached. A trade holding a token with no price has no net to
+compare, so a bound leaves it out rather than guessing which side of the line it falls.
 
 ## How profit is decided
 
@@ -92,6 +108,11 @@ that net is the trade's gross. Movements between two watched addresses are dropp
 money is not profit, which is also why a sweep from a contract to its owner does not register as one.
 
 Gas is `gasUsed x gasPrice` in native units, priced through the wrapped native token.
+
+A reverted transaction moved no token and still paid its gas, so its net is that gas as a loss. The
+same is true of a transaction that landed and kept nothing. That is a real zero rather than a
+missing value, and it is not the same as a trade holding a token GeckoTerminal cannot price, whose
+profit stays unknown.
 
 **Amounts are valued at current prices, not the price at the time of the trade.** That is deliberate
 — it answers "what is the profit I am holding worth now" — but it means a historical window is

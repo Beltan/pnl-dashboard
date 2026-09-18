@@ -42,6 +42,9 @@ export class Store {
         PRIMARY KEY (chain, hash)
       );
       CREATE INDEX IF NOT EXISTS trades_ts ON trades (chain, ts);
+      -- The table's own order, newest first. Scanned backwards it answers a page without sorting
+      -- the whole history to find fifty rows. Added to an existing database on the next open.
+      CREATE INDEX IF NOT EXISTS trades_ts_hash ON trades (ts, hash);
 
       -- delta is signed in raw units: what this movement added to, or took from, the watched set.
       -- It is a double, so it carries magnitude exactly and precision far past anything a USD
@@ -119,23 +122,51 @@ export class Store {
    * Trades, each with the one token it was left holding: the token whose net is largest and
    * positive. A round trip nets every token it passed through to zero and leaves the surplus in one.
    *
-   * Capped, because this feeds a table a person reads. Totals and the chart never come from here -
-   * summing a capped page would report the page rather than the window.
+   * One page of them. Totals and the chart never come from here - summing a page would report the
+   * page rather than the window.
+   *
+   * The sort is by time and then by hash: ties inside a second would otherwise order arbitrarily,
+   * and a row that moves between two pages under OFFSET is one the reader never sees.
    */
-  query(where: string, params: unknown[], limit: number): QueryRow[] {
+  query(where: string, params: unknown[], limit: number, offset = 0): QueryRow[] {
     return this.db
       .prepare(
-        `${BEST}
-         SELECT t.chain, t.hash, t.from_addr, t.to_addr, t.block, t.ts, t.status,
-                t.gas_used, t.gas_native, t.gas_ours,
-                b.token, b.symbol, b.decimals, b.net
-           FROM trades t
-           LEFT JOIN best b ON b.chain = t.chain AND b.hash = t.hash AND b.rank = 1
-          WHERE ${where}
-          ORDER BY t.ts DESC
-          LIMIT ?`,
+        // The page is chosen before the transfers are touched, so the netting runs over the rows
+        // being shown rather than over every transfer ever stored. Netting first and taking the
+        // page afterwards costs the same whether the page is the first fifty rows or the whole
+        // table, which is what made the uncapped table slow.
+        `WITH page AS (
+           SELECT t.chain, t.hash, t.from_addr, t.to_addr, t.block, t.ts, t.status,
+                  t.gas_used, t.gas_native, t.gas_ours
+             FROM trades t
+            WHERE ${where}
+            ORDER BY t.ts DESC, t.hash DESC
+            LIMIT ? OFFSET ?
+         ), nets AS (
+           SELECT r.chain, r.hash, r.token, MAX(r.symbol) symbol, MAX(r.decimals) decimals, SUM(r.delta) net
+             FROM transfers r
+             JOIN page p ON p.chain = r.chain AND p.hash = r.hash
+            GROUP BY r.chain, r.hash, r.token
+         ), best AS (
+           SELECT chain, hash, token, symbol, decimals, net,
+                  ROW_NUMBER() OVER (PARTITION BY chain, hash ORDER BY net DESC) rank
+             FROM nets WHERE net > 0
+         )
+         SELECT p.*, b.token, b.symbol, b.decimals, b.net
+           FROM page p
+           LEFT JOIN best b ON b.chain = p.chain AND b.hash = p.hash AND b.rank = 1
+          ORDER BY p.ts DESC, p.hash DESC`,
       )
-      .all(...(params as never[]), limit) as unknown as QueryRow[];
+      .all(...(params as never[]), limit, offset) as unknown as QueryRow[];
+  }
+
+  /**
+   * How many rows match, for the page count. Cheap: the filters only ever touch `trades`, so this
+   * never needs the transfer join that `query` does.
+   */
+  count(where: string, params: unknown[]): number {
+    const row = this.db.prepare(`SELECT COUNT(*) n FROM trades t WHERE ${where}`).get(...(params as never[])) as { n: number };
+    return row.n;
   }
 
   /**

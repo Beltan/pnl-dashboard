@@ -67,6 +67,15 @@ const HTML = `<!doctype html>
   .pill { font-size:11px; padding:1px 7px; border-radius:99px; border:1px solid var(--ring); color:var(--ink-2); }
   .scroll { overflow-x:auto; }
   .empty { padding:26px 16px; color:var(--muted); font-size:13px; text-align:center; }
+  input[type=number] { background:var(--plane); color:var(--ink); border:1px solid var(--ring);
+           border-radius:7px; padding:6px 9px; font:inherit; font-size:13px; width:92px; }
+  .pager { display:flex; align-items:center; gap:10px; padding:10px 14px;
+           border-top:1px solid var(--ring); font-size:12px; color:var(--ink-2); flex-wrap:wrap; }
+  .pager .spacer { flex:1; }
+  button { background:var(--plane); color:var(--ink); border:1px solid var(--ring);
+           border-radius:7px; padding:5px 11px; font:inherit; font-size:12px; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--baseline); }
+  button:disabled { color:var(--muted); cursor:default; opacity:.55; }
   footer { max-width:1180px; margin:0 auto; padding:0 20px 30px; color:var(--muted); font-size:12px; }
 </style>
 </head>
@@ -83,6 +92,8 @@ const HTML = `<!doctype html>
       <select id="outcome"><option value="all">All</option><option value="landed">Landed</option><option value="reverted">Reverted</option></select></div>
     <div class="f"><label for="hours">Window</label>
       <select id="hours"><option value="1">1 hour</option><option value="8">8 hours</option><option value="24" selected>24 hours</option><option value="72">3 days</option><option value="168">7 days</option></select></div>
+    <div class="f"><label for="minNet">Net min $</label><input id="minNet" type="number" step="any" placeholder="any" /></div>
+    <div class="f"><label for="maxNet">Net max $</label><input id="maxNet" type="number" step="any" placeholder="any" /></div>
     <div class="grow"></div>
     <div class="f"><label for="theme">Theme</label>
       <select id="theme"><option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select></div>
@@ -109,6 +120,16 @@ const HTML = `<!doctype html>
       <tbody id="rows"></tbody>
     </table>
     <div class="empty" id="empty" hidden>Nothing in this window.</div>
+    <div class="pager">
+      <span id="range"></span>
+      <select id="size"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="250">250</option></select>
+      <span class="spacer"></span>
+      <button id="first" type="button">&laquo; First</button>
+      <button id="prev" type="button">&lsaquo; Prev</button>
+      <span id="which"></span>
+      <button id="next" type="button">Next &rsaquo;</button>
+      <button id="last" type="button">Last &raquo;</button>
+    </div>
   </section>
 </main>
 <footer id="foot"></footer>
@@ -279,9 +300,34 @@ function windows(opens) {
   $("hours").innerHTML = options.join("");
 }
 
+var PAGE = 1;
+
 function query() {
   return "?chain=" + $("chain").value + "&address=" + $("address").value +
-         "&outcome=" + $("outcome").value + "&hours=" + $("hours").value;
+         "&outcome=" + $("outcome").value + "&hours=" + $("hours").value +
+         "&page=" + PAGE + "&size=" + $("size").value +
+         "&minNet=" + encodeURIComponent($("minNet").value.trim()) +
+         "&maxNet=" + encodeURIComponent($("maxNet").value.trim());
+}
+
+function count(n) { return n.toLocaleString("en-US"); }
+
+function pager() {
+  var page = DATA.page || 1, pages = DATA.totalPages || 1, total = DATA.total || 0;
+  var size = DATA.pageSize || 50;
+  var from = total === 0 ? 0 : (page - 1) * size + 1;
+  var to = Math.min(total, page * size);
+  $("range").textContent = total === 0 ? "No matching transactions"
+    : "Showing " + count(from) + "–" + count(to) + " of " + count(total);
+  $("which").textContent = "Page " + count(page) + " of " + count(pages);
+  $("first").disabled = $("prev").disabled = page <= 1;
+  $("next").disabled = $("last").disabled = page >= pages;
+}
+
+function go(to) {
+  var pages = (DATA && DATA.totalPages) || 1;
+  PAGE = Math.min(Math.max(1, to), pages);
+  load();
 }
 
 async function load() {
@@ -295,21 +341,29 @@ async function load() {
   META = await (await fetch("/api/meta")).json();
   DATA = await (await fetch("/api/trades" + query())).json();
   if (DATA.error) { $("sub").textContent = "query failed: " + DATA.error; return; }
+  // The server clamps the page, so a filter that shrinks the result does not strand the reader.
+  PAGE = DATA.page || 1;
   tiles(DATA.totals);
   draw();
   rows();
+  pager();
   var when = DATA.refreshedAt ? new Date(DATA.refreshedAt).toISOString().slice(11, 19) + " UTC" : "never";
-  $("sub").textContent = DATA.totals.sent + " transactions · refreshed " + when;
+  $("sub").textContent = count(DATA.totals.sent) + " transactions · refreshed " + when;
   var notes = [];
-  if (DATA.truncated) notes.push("older rows beyond the row cap are not shown");
+  if (DATA.scanLimited) notes.push("the net filter was applied to the 50,000 most recent matching transactions, so older ones are not counted");
   if (DATA.totals.unpriced) notes.push(DATA.totals.unpriced + " trades hold a token with no price, so their profit is missing from the totals");
   notes.push("bucket " + Math.round(DATA.stepSeconds / 60) + " min");
   $("foot").textContent = notes.join(" · ");
 }
 
-["chain", "address", "outcome", "hours"].forEach(function (id) {
-  $(id).addEventListener("change", function () { if (id === "chain") addresses(); load(); });
+// Any filter change returns to the first page: page 7 of the old result means nothing in the new one.
+["chain", "address", "outcome", "hours", "size", "minNet", "maxNet"].forEach(function (id) {
+  $(id).addEventListener("change", function () { if (id === "chain") addresses(); PAGE = 1; load(); });
 });
+$("first").addEventListener("click", function () { go(1); });
+$("prev").addEventListener("click", function () { go(PAGE - 1); });
+$("next").addEventListener("click", function () { go(PAGE + 1); });
+$("last").addEventListener("click", function () { go((DATA && DATA.totalPages) || 1); });
 $("theme").addEventListener("change", function () { setTheme(this.value); });
 // ?theme= wins over what this browser remembered, so a link can carry the mode it was read in.
 var asked = new URLSearchParams(location.search).get("theme");

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clauses, priced, series, totals } from "../src/api.ts";
+import { clauses, priced, series, totals, withinBounds } from "../src/api.ts";
 import { Prices } from "../src/pricing.ts";
-import { stepFor } from "../src/server.ts";
+import { pageFrom, pageSizeFrom, stepFor } from "../src/server.ts";
 import type { QueryRow } from "../src/store.ts";
 import type { ChainConfig } from "../src/types.ts";
 
@@ -142,4 +142,73 @@ test("gas pulls a bucket negative when nothing was earned in it", () => {
 test("the bucket width keeps a window readable and never goes sub-five-minute", () => {
   assert.equal(stepFor(1), 300);
   assert.ok(stepFor(168) > stepFor(24));
+});
+
+test("a reverted transaction reports the gas it burned as a loss", () => {
+  // Reverted: no token movement survived, so the join leaves it holding nothing.
+  const [trade] = priced([row({ status: 0, token: null, symbol: null, decimals: null, net: null })],
+    new Map([["flare", chain()]]), withPrice(0.02), new Map());
+
+  assert.equal(trade!.profitUsd, 0, "holding nothing is nothing gained, not an unknown");
+  assert.equal(trade!.netUsd, -0.02, "the gas is still paid, so the net is negative");
+});
+
+test("a landed transaction that kept nothing is also a loss, not a blank", () => {
+  const [trade] = priced([row({ status: 1, token: null, symbol: null, decimals: null, net: null })],
+    new Map([["flare", chain()]]), withPrice(0.02), new Map());
+
+  assert.equal(trade!.netUsd, -0.02);
+});
+
+test("gas paid by someone else costs a reverted transaction nothing", () => {
+  const [trade] = priced([row({ status: 0, gas_ours: 0, token: null, symbol: null, decimals: null, net: null })],
+    new Map([["flare", chain()]]), withPrice(0.02), new Map());
+
+  assert.equal(trade!.netUsd, 0, "a revert we did not pay for is not our loss");
+});
+
+test("a held token with no price stays unknown rather than reading as zero", () => {
+  const [trade] = priced([row({ status: 1 })], new Map([["flare", chain()]]), new Prices(), new Map());
+
+  assert.equal(trade!.profitUsd, null, "an unpriced token is not a transaction that earned nothing");
+  assert.equal(trade!.netUsd, null);
+});
+
+test("net bounds keep the trades inside them", () => {
+  const trades = [
+    { netUsd: -5 }, { netUsd: -0.5 }, { netUsd: 0 }, { netUsd: 3 }, { netUsd: null },
+  ] as never as Parameters<typeof withinBounds>[0];
+
+  assert.deepEqual(withinBounds(trades, { min: 0 }).map((t) => t.netUsd), [0, 3]);
+  assert.deepEqual(withinBounds(trades, { max: 0 }).map((t) => t.netUsd), [-5, -0.5, 0]);
+  assert.deepEqual(withinBounds(trades, { min: -1, max: 1 }).map((t) => t.netUsd), [-0.5, 0]);
+});
+
+test("a bound of zero is a bound, and no bound leaves every row alone", () => {
+  const trades = [{ netUsd: -5 }, { netUsd: null }] as never as Parameters<typeof withinBounds>[0];
+
+  assert.equal(withinBounds(trades, {}).length, 2, "an unset bound must not drop the unpriced row");
+  assert.equal(withinBounds(trades, { max: 0 }).length, 1, "zero is a real bound, not an empty one");
+});
+
+test("a trade whose net is unknown is left out of a bounded table", () => {
+  const trades = [{ netUsd: null }] as never as Parameters<typeof withinBounds>[0];
+  assert.equal(withinBounds(trades, { min: -1e9 }).length, 0, "an unknown net cannot be claimed to match");
+});
+
+test("a page is clamped to what the result actually has", () => {
+  assert.equal(pageFrom(1, 0, 50), 1, "an empty result still has a first page");
+  assert.equal(pageFrom(3, 7128, 50), 3);
+  assert.equal(pageFrom(999, 7128, 50), 143, "past the end lands on the last page");
+  assert.equal(pageFrom(0, 7128, 50), 1);
+  assert.equal(pageFrom(-4, 7128, 50), 1);
+  assert.equal(pageFrom(NaN, 7128, 50), 1, "a junk page parameter is page one, not a crash");
+});
+
+test("only the offered page sizes are honoured", () => {
+  const size = (raw: string) => pageSizeFrom(new URL("http://x/api/trades?size=" + raw));
+  assert.equal(size("25"), 25);
+  assert.equal(size("250"), 250);
+  assert.equal(size("10000"), 50, "an unoffered size falls back rather than paging the whole table");
+  assert.equal(size("junk"), 50);
 });

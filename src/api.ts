@@ -43,7 +43,10 @@ export function priced(rows: QueryRow[], chains: Map<string, ChainConfig>, price
 
     const tokenUsd = price(prices, chain, row.token);
     const whole = row.net !== null && row.decimals !== null ? row.net / 10 ** row.decimals : null;
-    const profitUsd = whole !== null && tokenUsd !== null ? whole * tokenUsd : null;
+    // Holding nothing is a real zero, not an unknown: a reverted transaction moved no token and
+    // still paid its gas, so its net is the gas back. Only a token that has no price is unknown,
+    // and that stays null rather than reading as a transaction that earned nothing.
+    const profitUsd = whole === null ? 0 : tokenUsd === null ? null : whole * tokenUsd;
 
     return {
       chain: row.chain,
@@ -138,6 +141,34 @@ export function series(
     for (let key = first; key <= last; key += stepSeconds) at(key);
   }
   return [...buckets.values()].sort((a, b) => a.at - b.at);
+}
+
+/** Bounds on the net USD column, which is the one filter SQL cannot apply. */
+export interface Bounds {
+  min?: number;
+  max?: number;
+}
+
+export function bounded(bounds: Bounds): boolean {
+  return bounds.min !== undefined || bounds.max !== undefined;
+}
+
+/**
+ * Trades whose net falls inside the bounds.
+ *
+ * Net is priced at request time from prices that live in memory, never in the database, so this
+ * cannot be a WHERE clause and cannot be counted by SQL — the rows have to be valued before it is
+ * known which of them match. A trade whose net is unknown, because it holds a token with no price,
+ * is left out rather than guessed either side of the bound.
+ */
+export function withinBounds(trades: Trade[], bounds: Bounds): Trade[] {
+  if (!bounded(bounds)) return trades;
+  return trades.filter((trade) => {
+    if (trade.netUsd === null) return false;
+    if (bounds.min !== undefined && trade.netUsd < bounds.min) return false;
+    if (bounds.max !== undefined && trade.netUsd > bounds.max) return false;
+    return true;
+  });
 }
 
 /** Every token any matching trade rests in, so prices are fetched once per request. */
