@@ -10,3 +10,11 @@ services:
     # Bound to loopback: put a reverse proxy in front if it needs to leave the box.
     ports:
       - "127.0.0.1:${PORT:-8080}:${PORT:-8080}"
+    # History outlives the container. Without this a rebuild starts every address's backfill again
+    # from its first transaction. A named volume rather than a bind mount, so it keeps the image's
+    # ownership and the unprivileged process can write to it.
+    volumes:
+      - history:/app/data
+
+volumes:
+  history:

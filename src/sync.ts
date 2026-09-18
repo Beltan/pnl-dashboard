@@ -1,14 +1,22 @@
 import { walk, type TokenRow, type TxRow } from "./chain/explorer.ts";
+import { short } from "./config.ts";
 import { log } from "./log.ts";
 import { Store, type TradeRecord, type TransferRecord } from "./store.ts";
 import type { AppConfig, ChainConfig } from "./types.ts";
 
 export interface ChainState {
-  /** Null until the first pass finishes. */
+  /** When a pass last read every watched address to the end of its history. Null until then. */
   syncedAt: number | null;
   backfilling: boolean;
+  /** What stopped the last pass short, or null if it completed. */
   error: string | null;
   trades: number;
+}
+
+/** What one address's walk read, and what stopped it if anything did. */
+interface Read {
+  written: number;
+  error: string | null;
 }
 
 /** Raw units as a double: the magnitude is exact and the precision is far past any USD figure. */
@@ -21,11 +29,14 @@ export class Sync {
   private readonly state = new Map<string, ChainState>();
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  // Assigned in the body rather than declared as constructor parameters: Node's type stripping,
+  // which `npm run dev` and `npm test` both use, cannot erase a parameter property.
+  private readonly config: AppConfig;
+  private readonly store: Store;
 
-  constructor(
-    private readonly config: AppConfig,
-    private readonly store: Store,
-  ) {
+  constructor(config: AppConfig, store: Store) {
+    this.config = config;
+    this.store = store;
     for (const chain of config.chains) {
       this.state.set(chain.name, { syncedAt: null, backfilling: true, error: null, trades: 0 });
     }
@@ -69,15 +80,27 @@ export class Sync {
     const watched = new Set(chain.watched.map((entry) => entry.address));
     let trades = 0;
     let transfers = 0;
+    // A page that fails leaves the rest of that address for the next pass. The pass is still
+    // incomplete, so it is reported rather than passed off as a sync that found nothing.
+    const failures: string[] = [];
     try {
       for (const entry of chain.watched) {
-        trades += await this.syncTrades(chain, entry.address, watched);
-        transfers += await this.syncTransfers(chain, entry.address, watched);
+        const txlist = await this.syncTrades(chain, entry.address, watched);
+        trades += txlist.written;
+        if (txlist.error) failures.push(`${short(entry.address)} txlist: ${txlist.error}`);
+        const tokentx = await this.syncTransfers(chain, entry.address, watched);
+        transfers += tokentx.written;
+        if (tokentx.error) failures.push(`${short(entry.address)} tokentx: ${tokentx.error}`);
       }
-      held.error = null;
-      held.backfilling = false;
-      held.syncedAt = Date.now();
       held.trades = this.store.stats().trades;
+      if (failures.length > 0) {
+        held.error = failures.join("; ");
+        log.error("A chain sync did not complete", { chain: chain.name, failures: failures.length, error: held.error });
+      } else {
+        held.error = null;
+        held.backfilling = false;
+        held.syncedAt = Date.now();
+      }
       if (trades || transfers) {
         log.info("Chain synced", { chain: chain.name, trades, transfers, ms: Date.now() - started });
       }
@@ -87,10 +110,10 @@ export class Sync {
     }
   }
 
-  private async syncTrades(chain: ChainConfig, address: string, watched: Set<string>): Promise<number> {
+  private async syncTrades(chain: ChainConfig, address: string, watched: Set<string>): Promise<Read> {
     const from = this.store.cursor(chain.name, address, "txlist");
     let written = 0;
-    const highest = await walk<TxRow>(chain.explorerUrl, "txlist", address, from, (rows) => {
+    const { highest, error } = await walk<TxRow>(chain.explorerUrl, "txlist", address, from, (rows) => {
       const records: TradeRecord[] = rows.map((row) => {
         const sender = row.from.toLowerCase();
         const gasUsed = Number(row.gasUsed);
@@ -111,14 +134,16 @@ export class Sync {
       });
       written += this.store.putTrades(records);
     });
+    // The blocks that were read are kept even when the walk stopped short, so a failure costs the
+    // next pass one page rather than the whole backfill.
     if (highest > from) this.store.setCursor(chain.name, address, "txlist", highest);
-    return written;
+    return { written, error };
   }
 
-  private async syncTransfers(chain: ChainConfig, address: string, watched: Set<string>): Promise<number> {
+  private async syncTransfers(chain: ChainConfig, address: string, watched: Set<string>): Promise<Read> {
     const from = this.store.cursor(chain.name, address, "tokentx");
     let written = 0;
-    const highest = await walk<TokenRow>(chain.explorerUrl, "tokentx", address, from, (rows) => {
+    const { highest, error } = await walk<TokenRow>(chain.explorerUrl, "tokentx", address, from, (rows) => {
       const records: TransferRecord[] = [];
       for (const row of rows) {
         const to = row.to.toLowerCase();
@@ -143,6 +168,6 @@ export class Sync {
       written += this.store.putTransfers(records);
     });
     if (highest > from) this.store.setCursor(chain.name, address, "tokentx", highest);
-    return written;
+    return { written, error };
   }
 }

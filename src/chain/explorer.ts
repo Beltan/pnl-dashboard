@@ -48,12 +48,23 @@ async function page<T>(explorerUrl: string, action: string, address: string, sta
   return body.result as T[];
 }
 
+export interface WalkResult {
+  /** The highest block reached, whether or not the walk ran out of history. */
+  highest: number;
+  /** Why the walk stopped short, or null if it read to the end of the address's history. */
+  error: string | null;
+}
+
 /**
  * Every row from `startBlock` forward, oldest first, walked by block rather than by page number:
  * these APIs cap how deep `page=` goes, and the cap is well inside a wallet's history.
  *
  * Rows in the boundary block are re-read on the next pass and deduplicated by the caller, which is
  * what keeps a block with more rows than one page from being split.
+ *
+ * A page that fails stops the walk rather than failing it: the blocks already read are kept and
+ * the rest is left for the next pass. The reason comes back so the caller can say so, because a
+ * chain whose explorer never answers otherwise looks exactly like one with nothing new.
  */
 export async function walk<T extends { blockNumber: string; hash: string }>(
   explorerUrl: string,
@@ -61,7 +72,7 @@ export async function walk<T extends { blockNumber: string; hash: string }>(
   address: string,
   startBlock: number,
   onPage: (rows: T[]) => void,
-): Promise<number> {
+): Promise<WalkResult> {
   let cursor = startBlock;
   let highest = startBlock;
   for (let pages = 0; pages < MAX_PAGES; pages++) {
@@ -70,7 +81,7 @@ export async function walk<T extends { blockNumber: string; hash: string }>(
       rows = await page<T>(explorerUrl, action, address, cursor);
     } catch (error) {
       log.warn("An explorer page failed", { address, action, cursor, error: String(error) });
-      break;
+      return { highest, error: String(error) };
     }
     if (rows.length === 0) break;
     onPage(rows);
@@ -81,5 +92,5 @@ export async function walk<T extends { blockNumber: string; hash: string }>(
     const next = Number(last.blockNumber);
     cursor = next > cursor ? next : cursor + 1;
   }
-  return highest;
+  return { highest, error: null };
 }

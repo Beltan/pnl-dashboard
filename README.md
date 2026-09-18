@@ -30,6 +30,11 @@ The walk advances by block rather than page number, because these APIs cap how d
 the cap sits well inside a busy wallet's history. The boundary block is re-read on the next pass and
 collapses on the primary key, so a block whose rows span two pages is never half-read.
 
+An explorer page that fails stops that address's walk without discarding the blocks already read, so
+the next pass resumes rather than starting over. The pass is still reported as incomplete: the chain
+carries the reason, `syncedAt` stays at the last pass that read everything, and `/healthz` answers
+503. A chain whose explorer never answers reads as unhealthy rather than as one with nothing new.
+
 ## Configuration
 
 Every chain named in `CHAINS` reads its own block of variables, prefixed with its upper-cased name,
@@ -66,6 +71,10 @@ npm start         # reads .env if present
 Or `docker compose up -d --build`, which reads the same `.env`. SQLite needs Node's
 `--experimental-sqlite` flag, which the scripts and the image already pass.
 
+The history lives in the `history` volume, mounted at `/app/data`, so a rebuild keeps it. Set
+`DB_PATH` somewhere under that directory or the database goes into the container's own layer and
+every deploy backfills from the beginning again.
+
 ## Routes
 
 | Route | What it serves |
@@ -73,7 +82,7 @@ Or `docker compose up -d --build`, which reads the same `.env`. SQLite needs Nod
 | `/` | the dashboard; `?theme=dark\|light\|auto` overrides the stored theme |
 | `/api/meta` | configured chains, addresses, sync state and how much history is held |
 | `/api/trades` | filtered trades, totals and the chart series; `chain`, `address`, `outcome`, `hours` (`hours=0` is all of it) |
-| `/healthz` | per-chain sync state and store counts; 503 until every chain has synced once |
+| `/healthz` | `503` until every chain has read its full history, and whenever a pass since then stopped short; per-chain state and store counts are added for an authenticated caller |
 
 ## How profit is decided
 

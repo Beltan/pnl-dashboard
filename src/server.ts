@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { authorised } from "./auth.ts";
+import { authenticated, authorised } from "./auth.ts";
 import { clauses, loadPrices, priced, series, totals, type Query } from "./api.ts";
 import { log } from "./log.ts";
 import { page } from "./page.ts";
@@ -47,7 +47,15 @@ export function createDashboard(config: AppConfig, store: Store, sync: Sync, pri
     if (url.pathname === "/healthz") {
       const state = [...sync.snapshot().entries()].map(([name, held]) => ({ chain: name, ...held }));
       const healthy = state.every((chain) => chain.syncedAt !== null && chain.error === null);
-      json(response, { ok: healthy, chains: state, store: store.stats() }, healthy ? 200 : 503);
+      const status = healthy ? 200 : 503;
+      // Left unauthenticated so a probe can reach it, but the detail — which chains are watched,
+      // how much history is held — is only for a caller that could read it off the dashboard.
+      // The status code is what a monitor acts on, and that is the same either way.
+      if (!authenticated(request, config.user, config.password)) {
+        json(response, { ok: healthy }, status);
+        return;
+      }
+      json(response, { ok: healthy, chains: state, store: store.stats() }, status);
       return;
     }
 
