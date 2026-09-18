@@ -46,12 +46,18 @@ export class Sync {
     this.timer = null;
   }
 
-  /** One pass over every chain. Passes never overlap: a backfill can outlast the interval. */
+  /**
+   * One pass over every chain. Passes never overlap: a backfill can outlast the interval.
+   *
+   * Chains run together, since each has its own explorer and a long backfill on one would
+   * otherwise hold every other chain at zero until it finished. Addresses within a chain stay
+   * sequential, which is what keeps one explorer from being hit in parallel.
+   */
   async pass(): Promise<void> {
     if (this.running) return;
     this.running = true;
     try {
-      for (const chain of this.config.chains) await this.syncChain(chain);
+      await Promise.all(this.config.chains.map((chain) => this.syncChain(chain)));
     } finally {
       this.running = false;
     }

@@ -80,15 +80,20 @@ export function createDashboard(config: AppConfig, store: Store, sync: Sync, pri
       try {
         const query = queryFrom(url);
         const { where, params } = clauses(query);
-        const rows = store.query(where, params, MAX_ROWS);
-        await loadPrices(store, config.chains, prices, rows);
-        const trades = priced(rows, chains, prices, labels);
         const hours = query.hours ?? config.windowHours;
+        const step = stepFor(hours);
+
+        // Aggregates run over every matching row; only the table is capped.
+        const rows = store.query(where, params, MAX_ROWS);
+        const summary = store.summary(where, params);
+        const chart = store.buckets(where, params, step);
+        await loadPrices(config.chains, prices, rows, summary.held, chart.held);
+
         json(response, {
-          totals: totals(trades),
-          series: series(trades, stepFor(hours)),
-          stepSeconds: stepFor(hours),
-          trades,
+          totals: totals(summary.counts, summary.held, chains, prices),
+          series: series(chart.counts, chart.held, chains, prices, step),
+          stepSeconds: step,
+          trades: priced(rows, chains, prices, labels),
           truncated: rows.length === MAX_ROWS,
           syncedAt: Math.max(0, ...[...sync.snapshot().values()].map((held) => held.syncedAt ?? 0)) || null,
         });

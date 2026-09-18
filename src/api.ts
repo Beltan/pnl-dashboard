@@ -1,5 +1,5 @@
 import type { Prices } from "./pricing.ts";
-import type { QueryRow, Store } from "./store.ts";
+import type { BucketCount, BucketHeld, CountRow, HeldRow, QueryRow, Store } from "./store.ts";
 import type { ChainConfig, Totals, Trade } from "./types.ts";
 
 export interface Query {
@@ -67,16 +67,25 @@ export function priced(rows: QueryRow[], chains: Map<string, ChainConfig>, price
   });
 }
 
-export function totals(trades: Trade[]): Totals {
+/**
+ * Totals over every matching row, not over the page the table shows. Gas is valued per chain, since
+ * each chain's gas is denominated in its own token.
+ */
+export function totals(counts: CountRow[], held: HeldRow[], chains: Map<string, ChainConfig>, prices: Prices): Totals {
   const out: Totals = { sent: 0, landed: 0, reverted: 0, grossUsd: 0, gasUsd: 0, netUsd: 0, unpriced: 0 };
-  for (const trade of trades) {
-    out.sent += 1;
-    if (trade.status === 1) out.landed += 1;
-    else out.reverted += 1;
-    if (trade.gasUsd !== null) out.gasUsd += trade.gasUsd;
-    if (trade.profitUsd !== null) out.grossUsd += trade.profitUsd;
-    // A profit token with no price would otherwise read as no profit at all.
-    else if (trade.profitAmount !== null) out.unpriced += 1;
+  for (const row of counts) {
+    out.sent += row.sent;
+    out.landed += row.landed;
+    out.reverted += row.sent - row.landed;
+    const chain = chains.get(row.chain);
+    const nativeUsd = chain?.nativePriceToken ? prices.usd(chain.geckoNetwork, chain.nativePriceToken) : null;
+    if (nativeUsd !== null) out.gasUsd += row.gas_native * nativeUsd;
+  }
+  for (const row of held) {
+    const usd = price(prices, chains.get(row.chain), row.token);
+    // A token with no price would otherwise read as no profit at all.
+    if (usd === null) out.unpriced += row.trades;
+    else out.grossUsd += (row.net / 10 ** row.decimals) * usd;
   }
   out.netUsd = out.grossUsd - out.gasUsd;
   return out;
@@ -89,28 +98,50 @@ export interface Bucket {
   landed: number;
 }
 
-/** Buckets for the chart. `stepSeconds` is chosen by the caller from the window on screen. */
-export function series(trades: Trade[], stepSeconds: number, now = Math.floor(Date.now() / 1000)): Bucket[] {
-  if (trades.length === 0) return [];
-  const oldest = Math.min(...trades.map((trade) => trade.timestamp));
-  const first = Math.floor(oldest / stepSeconds) * stepSeconds;
-  const last = Math.floor(now / stepSeconds) * stepSeconds;
+/**
+ * Chart buckets over every matching row. Empty buckets between the first and last are filled so the
+ * time axis stays continuous rather than closing the gaps.
+ */
+export function series(
+  counts: BucketCount[],
+  held: BucketHeld[],
+  chains: Map<string, ChainConfig>,
+  prices: Prices,
+  stepSeconds: number,
+): Bucket[] {
+  if (counts.length === 0) return [];
   const buckets = new Map<number, Bucket>();
-  // A window far wider than the chart still draws: the caller's step keeps the count sane.
-  for (let at = first; at <= last; at += stepSeconds) buckets.set(at, { at, netUsd: 0, sent: 0, landed: 0 });
-  for (const trade of trades) {
-    const at = Math.floor(trade.timestamp / stepSeconds) * stepSeconds;
-    const bucket = buckets.get(at);
-    if (!bucket) continue;
-    bucket.sent += 1;
-    if (trade.status === 1) bucket.landed += 1;
-    if (trade.netUsd !== null) bucket.netUsd += trade.netUsd;
+  const at = (key: number): Bucket => {
+    const found = buckets.get(key) ?? { at: key, netUsd: 0, sent: 0, landed: 0 };
+    buckets.set(key, found);
+    return found;
+  };
+
+  for (const row of counts) {
+    const bucket = at(row.at);
+    bucket.sent += row.sent;
+    bucket.landed += row.landed;
+    const chain = chains.get(row.chain);
+    const nativeUsd = chain?.nativePriceToken ? prices.usd(chain.geckoNetwork, chain.nativePriceToken) : null;
+    if (nativeUsd !== null) bucket.netUsd -= row.gas_native * nativeUsd;
+  }
+  for (const row of held) {
+    const usd = price(prices, chains.get(row.chain), row.token);
+    if (usd !== null) at(row.at).netUsd += (row.net / 10 ** row.decimals) * usd;
+  }
+
+  const keys = [...buckets.keys()].sort((a, b) => a - b);
+  const first = keys[0]!;
+  const last = keys[keys.length - 1]!;
+  // Bounded: a year at a five-minute step would be a hundred thousand bars nobody can read.
+  if ((last - first) / stepSeconds < 5_000) {
+    for (let key = first; key <= last; key += stepSeconds) at(key);
   }
   return [...buckets.values()].sort((a, b) => a.at - b.at);
 }
 
-/** Every token any visible trade rests in, so prices are fetched once per pass. */
-export function tokensIn(rows: QueryRow[]): Map<string, Set<string>> {
+/** Every token any matching trade rests in, so prices are fetched once per request. */
+export function tokensIn(rows: { chain: string; token: string | null }[]): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>();
   for (const row of rows) {
     if (!row.token) continue;
@@ -121,9 +152,8 @@ export function tokensIn(rows: QueryRow[]): Map<string, Set<string>> {
   return out;
 }
 
-export function loadPrices(store: Store, chains: ChainConfig[], prices: Prices, rows: QueryRow[]): Promise<void[]> {
-  void store;
-  const byChain = tokensIn(rows);
+export function loadPrices(chains: ChainConfig[], prices: Prices, ...sets: { chain: string; token: string | null }[][]): Promise<void[]> {
+  const byChain = tokensIn(sets.flat());
   return Promise.all(
     chains.map((chain) => {
       const tokens = [...(byChain.get(chain.name) ?? [])];

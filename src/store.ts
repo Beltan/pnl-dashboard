@@ -10,6 +10,16 @@ import { log } from "./log.ts";
  * movement rather than pre-netted, so the same movement seen from two watched addresses collapses
  * on the primary key instead of being counted twice.
  */
+/** The one token each transaction was left holding, shared by every aggregate below. */
+const BEST = `WITH nets AS (
+  SELECT chain, hash, token, MAX(symbol) symbol, MAX(decimals) decimals, SUM(delta) net
+    FROM transfers GROUP BY chain, hash, token
+), best AS (
+  SELECT chain, hash, token, symbol, decimals, net,
+         ROW_NUMBER() OVER (PARTITION BY chain, hash ORDER BY net DESC) rank
+    FROM nets WHERE net > 0
+)`;
+
 export class Store {
   private readonly db: DatabaseSync;
 
@@ -108,18 +118,14 @@ export class Store {
   /**
    * Trades, each with the one token it was left holding: the token whose net is largest and
    * positive. A round trip nets every token it passed through to zero and leaves the surplus in one.
+   *
+   * Capped, because this feeds a table a person reads. Totals and the chart never come from here -
+   * summing a capped page would report the page rather than the window.
    */
   query(where: string, params: unknown[], limit: number): QueryRow[] {
     return this.db
       .prepare(
-        `WITH nets AS (
-           SELECT chain, hash, token, MAX(symbol) symbol, MAX(decimals) decimals, SUM(delta) net
-             FROM transfers GROUP BY chain, hash, token
-         ), best AS (
-           SELECT chain, hash, token, symbol, decimals, net,
-                  ROW_NUMBER() OVER (PARTITION BY chain, hash ORDER BY net DESC) rank
-             FROM nets WHERE net > 0
-         )
+        `${BEST}
          SELECT t.chain, t.hash, t.from_addr, t.to_addr, t.block, t.ts, t.status,
                 t.gas_used, t.gas_native, t.gas_ours,
                 b.token, b.symbol, b.decimals, b.net
@@ -130,6 +136,51 @@ export class Store {
           LIMIT ?`,
       )
       .all(...(params as never[]), limit) as unknown as QueryRow[];
+  }
+
+  /**
+   * Counts and gas over every matching row, per chain, and what each chain is left holding per
+   * token. Split by chain because gas is denominated in that chain's own token: summing FLR and
+   * AVAX into one number would be meaningless.
+   */
+  summary(where: string, params: unknown[]): { counts: CountRow[]; held: HeldRow[] } {
+    const counts = this.db
+      .prepare(
+        `SELECT t.chain, COUNT(*) sent, SUM(CASE WHEN t.status = 1 THEN 1 ELSE 0 END) landed,
+                SUM(CASE WHEN t.gas_ours = 1 THEN t.gas_native ELSE 0 END) gas_native
+           FROM trades t WHERE ${where} GROUP BY t.chain`,
+      )
+      .all(...(params as never[])) as unknown as CountRow[];
+    const held = this.db
+      .prepare(
+        `${BEST}
+         SELECT t.chain, b.token, b.symbol, b.decimals, SUM(b.net) net, COUNT(*) trades
+           FROM trades t JOIN best b ON b.chain = t.chain AND b.hash = t.hash AND b.rank = 1
+          WHERE ${where} GROUP BY t.chain, b.token, b.symbol, b.decimals`,
+      )
+      .all(...(params as never[])) as unknown as HeldRow[];
+    return { counts, held };
+  }
+
+  /** The same split again, bucketed by time, for the chart. */
+  buckets(where: string, params: unknown[], step: number): { counts: BucketCount[]; held: BucketHeld[] } {
+    const at = "(CAST(t.ts / ? AS INTEGER) * ?)";
+    const counts = this.db
+      .prepare(
+        `SELECT ${at} at, t.chain, COUNT(*) sent, SUM(CASE WHEN t.status = 1 THEN 1 ELSE 0 END) landed,
+                SUM(CASE WHEN t.gas_ours = 1 THEN t.gas_native ELSE 0 END) gas_native
+           FROM trades t WHERE ${where} GROUP BY at, t.chain`,
+      )
+      .all(step, step, ...(params as never[])) as unknown as BucketCount[];
+    const held = this.db
+      .prepare(
+        `${BEST}
+         SELECT ${at} at, t.chain, b.token, b.symbol, b.decimals, SUM(b.net) net
+           FROM trades t JOIN best b ON b.chain = t.chain AND b.hash = t.hash AND b.rank = 1
+          WHERE ${where} GROUP BY at, t.chain, b.token, b.symbol, b.decimals`,
+      )
+      .all(step, step, ...(params as never[])) as unknown as BucketHeld[];
+    return { counts, held };
   }
 
   stats(): { trades: number; transfers: number; oldest: number | null; newest: number | null } {
@@ -187,6 +238,35 @@ export interface TransferRecord {
   to: string;
   value: string;
   delta: number;
+}
+
+export interface CountRow {
+  chain: string;
+  sent: number;
+  landed: number;
+  gas_native: number;
+}
+
+export interface HeldRow {
+  chain: string;
+  token: string;
+  symbol: string;
+  decimals: number;
+  net: number;
+  trades: number;
+}
+
+export interface BucketCount extends CountRow {
+  at: number;
+}
+
+export interface BucketHeld {
+  at: number;
+  chain: string;
+  token: string;
+  symbol: string;
+  decimals: number;
+  net: number;
 }
 
 export interface QueryRow {
