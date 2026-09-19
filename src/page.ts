@@ -114,7 +114,7 @@ const HTML = `<!doctype html>
   <section class="panel scroll">
     <table>
       <thead><tr>
-        <th>Time (UTC)</th><th>Chain</th><th>From</th><th>Contract</th><th>Outcome</th>
+        <th>Time (GST)</th><th>Chain</th><th>From</th><th>Contract</th><th>Outcome</th>
         <th class="num">Gas</th><th class="num">Profit</th><th class="num">Net USD</th><th>Tx</th>
       </tr></thead>
       <tbody id="rows"></tbody>
@@ -146,7 +146,11 @@ function usd(v) {
 }
 function signed(v) { return (v > 0 ? "+" : "") + usd(v); }
 function cls(v) { return v === null ? "" : v > 0 ? "pos" : v < 0 ? "neg" : ""; }
-function stamp(seconds) { return new Date(seconds * 1000).toISOString().replace("T", " ").slice(0, 16); }
+// Every time on the page is Gulf Standard Time (UTC+4), the desk's own clock, not the browser's
+// and not UTC: a reader comparing the table against a chat log should not have to shift hours.
+var DATE_TIME = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dubai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+var CLOCK = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Dubai", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+function stamp(seconds) { return DATE_TIME.format(new Date(seconds * 1000)).replace(", ", " "); }
 
 function setTheme(mode) {
   if (mode === "auto") document.documentElement.removeAttribute("data-theme");
@@ -347,7 +351,7 @@ async function load() {
   draw();
   rows();
   pager();
-  var when = DATA.refreshedAt ? new Date(DATA.refreshedAt).toISOString().slice(11, 19) + " UTC" : "never";
+  var when = DATA.syncedAt ? CLOCK.format(new Date(DATA.syncedAt)) + " GST" : "never";
   $("sub").textContent = count(DATA.totals.sent) + " transactions · refreshed " + when;
   var notes = [];
   if (DATA.scanLimited) notes.push("the net filter was applied to the 50,000 most recent matching transactions, so older ones are not counted");
