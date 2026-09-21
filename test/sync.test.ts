@@ -8,9 +8,9 @@ import type { AppConfig } from "../src/types.ts";
 
 const ADDRESS = "0x3417afa3b5487b3abcd4fe55f83f4d3e53750d71";
 
-function config(explorerUrl: string): AppConfig {
+function config(explorerUrl: string, confirmBlocks = 0): AppConfig {
   return {
-    port: 0, host: "127.0.0.1", user: "admin", password: "", windowHours: 24, refreshSeconds: 60,
+    port: 0, host: "127.0.0.1", user: "admin", password: "", windowHours: 24, refreshSeconds: 60, confirmBlocks,
     dbPath: ":memory:",
     chains: [{
       name: "flare", explorerUrl, explorerSite: "http://127.0.0.1:9",
@@ -75,4 +75,89 @@ test("a failure says what actually went wrong, not just that fetch failed", asyn
   const held = sync.snapshot().get("flare")!;
   assert.doesNotMatch(held.error!, /^.*txlist: TypeError: fetch failed;/, "the wrapper alone is not a reason");
   assert.match(held.error!, /EAI_AGAIN|ENOTFOUND|getaddrinfo/, "the DNS failure has to be visible");
+});
+
+const POOL = "0x1111111111111111111111111111111111111111";
+const TOKEN = "0x2222222222222222222222222222222222222222";
+/** Recent enough for a repair pass to look at it. */
+const NOW = Math.floor(Date.now() / 1000) - 600;
+
+const tx = (block: number, hash: string) => ({
+  hash, from: ADDRESS, to: POOL, blockNumber: String(block), timeStamp: String(NOW + block),
+  txreceipt_status: "1", isError: "0", gasUsed: "100000", gasPrice: "25000000000",
+});
+const transfer = (block: number, hash: string) => ({
+  hash, from: POOL, to: ADDRESS, blockNumber: String(block), timeStamp: String(NOW + block),
+  contractAddress: TOKEN, value: "5000000000000000000", tokenSymbol: "WFLR", tokenDecimal: "18",
+});
+
+/**
+ * An explorer that has the later block's transfers indexed before the earlier one's, which is what
+ * a cursor parked on the high-water mark steps over.
+ */
+async function outOfOrder(late: number[]) {
+  let reads = 0;
+  const rows = (action: string | null, start: number) => {
+    if (action === "txlist") return [tx(100, "0xaa"), tx(200, "0xbb")].filter((r) => Number(r.blockNumber) >= start);
+    reads++;
+    const all = reads === 1 ? [transfer(200, "0xbb")] : late.map((block) => transfer(block, block === 100 ? "0xaa" : "0xbb"));
+    return all.filter((r) => Number(r.blockNumber) >= start);
+  };
+  const server = await explorer((url) => ({
+    status: 200,
+    body: { status: "1", message: "OK", result: rows(url.searchParams.get("action"), Number(url.searchParams.get("startblock"))) },
+  }));
+  return server;
+}
+
+test("a transfer the explorer indexes late is still found", async () => {
+  const server = await outOfOrder([100, 200]);
+  try {
+    const store = new Store(":memory:");
+    // The confirmation window is off, so this is the repair pass alone doing the healing.
+    const sync = new Sync(config(server.url), store);
+    await sync.pass();
+
+    const first = store.query("1 = 1", [], 50).find((row) => row.hash === "0xaa")!;
+    assert.equal(first.symbol, null, "the block-100 transfer was not indexed yet, so nothing is held");
+
+    // The second pass is the first that repairs, since the first was still a backfill; the third
+    // is the walk reading the block the repair rewound onto.
+    await sync.pass();
+    await sync.pass();
+    const healed = store.query("1 = 1", [], 50).find((row) => row.hash === "0xaa")!;
+    assert.equal(healed.symbol, "WFLR", "once the explorer has it, the trade holds its profit again");
+  } finally {
+    server.close();
+  }
+});
+
+test("the confirmation window keeps the cursor short of the highest block it read", async () => {
+  const server = await outOfOrder([100, 200]);
+  try {
+    const store = new Store(":memory:");
+    await new Sync(config(server.url, 150), store).pass();
+    assert.equal(store.cursor("flare", ADDRESS, "txlist"), 50, "200 read, 150 held back");
+  } finally {
+    server.close();
+  }
+});
+
+test("a landed transaction that really moved no token is only chased once", async () => {
+  // Block 100's transfer never arrives: a transaction that paid gas and moved nothing.
+  const server = await outOfOrder([200]);
+  try {
+    const store = new Store(":memory:");
+    const sync = new Sync(config(server.url), store);
+    // Backfill, then the repair that rewinds onto block 100, then the walk that finds nothing there.
+    await sync.pass();
+    await sync.pass();
+    await sync.pass();
+
+    assert.equal(store.cursor("flare", ADDRESS, "tokentx"), 200, "the walk is back at the tip");
+    await sync.pass();
+    assert.equal(store.cursor("flare", ADDRESS, "tokentx"), 200, "and a further pass does not rewind again");
+  } finally {
+    server.close();
+  }
 });

@@ -38,6 +38,15 @@ function number(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
   return value;
 }
 
+/** A count of blocks, which may be zero, unlike the positive numbers above. */
+function whole(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = env[key]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${key}=${raw} must be a whole number of blocks`);
+  return value;
+}
+
 /** Chains name their own variables, so a new chain is configuration and never code. */
 function chainFrom(env: NodeJS.ProcessEnv, name: string): ChainConfig {
   const prefix = name.toUpperCase().replace(/[^A-Z0-9]/g, "_");
@@ -80,6 +89,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     password: env.AUTH_PASSWORD ?? "",
     windowHours: number(env, "WINDOW_HOURS", 24),
     refreshSeconds: number(env, "REFRESH_SECONDS", 60),
+    // About twenty minutes on a two-second chain: long enough to cover an explorer that indexes a
+    // block's token transfers after it has already served a later block's. Zero trusts the
+    // explorer to be in order, which is what stranded transfers in the first place.
+    confirmBlocks: whole(env, "CONFIRM_BLOCKS", 600),
     dbPath: env.DB_PATH?.trim() || "data/pnl.db",
     chains,
   };

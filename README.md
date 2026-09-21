@@ -51,6 +51,7 @@ so adding a chain is configuration and never code. Copy `.env.example` to `.env`
 | `<CHAIN>_NATIVE_PRICE_TOKEN` | the wrapped native token, which is how gas gets a USD price |
 | `WINDOW_HOURS` | what the page opens on (default 24); history is kept in full regardless |
 | `REFRESH_SECONDS` | how often to sync (default 60); passes never overlap |
+| `CONFIRM_BLOCKS` | how far behind its high-water mark each cursor is parked (default 600), so blocks an explorer indexed out of order are read again |
 | `DB_PATH` | where the history lives (default `data/pnl.db`) |
 | `AUTH_USER` / `AUTH_PASSWORD` | basic auth over every route; an empty password leaves it open |
 | `PORT` / `HOST` | where to listen |

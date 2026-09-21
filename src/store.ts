@@ -70,6 +70,15 @@ export class Store {
         block   INTEGER NOT NULL,
         PRIMARY KEY (chain, address, action)
       );
+
+      -- Transactions whose transfers were already looked for a second time. A landed transaction
+      -- that really moved no token would otherwise be rewound to on every pass forever.
+      CREATE TABLE IF NOT EXISTS repairs (
+        chain TEXT NOT NULL,
+        hash  TEXT NOT NULL,
+        at    INTEGER NOT NULL,
+        PRIMARY KEY (chain, hash)
+      );
     `);
   }
 
@@ -87,6 +96,44 @@ export class Store {
           "ON CONFLICT(chain, address, action) DO UPDATE SET block = excluded.block",
       )
       .run(chain, address, action, block);
+  }
+
+  /**
+   * Transactions a watched address paid for that landed holding no transfer at all, newest first.
+   *
+   * A transaction that moved nothing is indistinguishable here from one whose transfers were never
+   * read, so the caller looks again rather than deciding; `repairs` is what stops it looking twice.
+   */
+  gaps(chain: string, since: number, limit: number): GapRow[] {
+    return this.db
+      .prepare(
+        `SELECT t.hash, t.block, t.from_addr, t.to_addr
+           FROM trades t
+          WHERE t.chain = ? AND t.ts >= ? AND t.status = 1 AND t.gas_ours = 1
+            AND NOT EXISTS (SELECT 1 FROM transfers r WHERE r.chain = t.chain AND r.hash = t.hash)
+            AND NOT EXISTS (SELECT 1 FROM repairs p WHERE p.chain = t.chain AND p.hash = t.hash)
+          ORDER BY t.block DESC
+          LIMIT ?`,
+      )
+      .all(chain, since, limit) as unknown as GapRow[];
+  }
+
+  markRepaired(chain: string, hashes: string[]): void {
+    if (hashes.length === 0) return;
+    const insert = this.db.prepare("INSERT OR IGNORE INTO repairs (chain, hash, at) VALUES (?,?,?)");
+    const at = Math.floor(Date.now() / 1000);
+    this.write(() => {
+      for (const hash of hashes) insert.run(chain, hash, at);
+      return hashes.length;
+    });
+  }
+
+  /** Drops a cursor back to `block`, never forward: a rewind must not skip what it meant to re-read. */
+  rewind(chain: string, address: string, action: string, block: number): boolean {
+    const changes = this.db
+      .prepare("UPDATE cursors SET block = ? WHERE chain = ? AND address = ? AND action = ? AND block > ?")
+      .run(block, chain, address, action, block).changes;
+    return Number(changes) > 0;
   }
 
   putTrades(rows: TradeRecord[]): number {
@@ -269,6 +316,13 @@ export interface TransferRecord {
   to: string;
   value: string;
   delta: number;
+}
+
+export interface GapRow {
+  hash: string;
+  block: number;
+  from_addr: string;
+  to_addr: string | null;
 }
 
 export interface CountRow {

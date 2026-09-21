@@ -29,6 +29,12 @@ export interface AppConfig {
   windowHours: number;
   /** Seconds between syncs. */
   refreshSeconds: number;
+  /**
+   * How far behind the highest block it has read a cursor is parked. An explorer can serve one
+   * block's rows before an earlier block's, so a cursor sitting on the high-water mark can step
+   * over a gap it will never look at again.
+   */
+  confirmBlocks: number;
   dbPath: string;
   chains: ChainConfig[];
 }

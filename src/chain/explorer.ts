@@ -75,6 +75,7 @@ export async function walk<T extends { blockNumber: string; hash: string }>(
 ): Promise<WalkResult> {
   let cursor = startBlock;
   let highest = startBlock;
+  let ended = false;
   for (let pages = 0; pages < MAX_PAGES; pages++) {
     let rows: T[];
     try {
@@ -83,14 +84,22 @@ export async function walk<T extends { blockNumber: string; hash: string }>(
       log.warn("An explorer page failed", { address, action, cursor, error: reason(error) });
       return { highest, error: reason(error) };
     }
-    if (rows.length === 0) break;
+    if (rows.length === 0) {
+      ended = true;
+      break;
+    }
     onPage(rows);
     const last = rows[rows.length - 1]!;
     highest = Math.max(highest, Number(last.blockNumber));
-    if (rows.length < PAGE) break;
+    if (rows.length < PAGE) {
+      ended = true;
+      break;
+    }
     // Re-read the boundary block so a block split across pages is not lost.
     const next = Number(last.blockNumber);
     cursor = next > cursor ? next : cursor + 1;
   }
-  return { highest, error: null };
+  // Running out of pages is not reaching the end of the history. Saying so keeps the chain out of
+  // the synced state it has not reached, and keeps a repair off a database still filling up.
+  return { highest, error: ended ? null : `stopped at the ${MAX_PAGES} page limit` };
 }

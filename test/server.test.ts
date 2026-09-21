@@ -13,7 +13,7 @@ const CONTRACT = "0x3417afa3b5487b3abcd4fe55f83f4d3e53750d71";
 
 function config(): AppConfig {
   return {
-    port: 0, host: "127.0.0.1", user: "admin", password: "", windowHours: 0, refreshSeconds: 60,
+    port: 0, host: "127.0.0.1", user: "admin", password: "", windowHours: 0, refreshSeconds: 60, confirmBlocks: 0,
     dbPath: ":memory:",
     chains: [{
       name: "flare", explorerUrl: "http://x/api", explorerSite: "http://x",
